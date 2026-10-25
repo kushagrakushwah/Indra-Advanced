@@ -146,7 +146,7 @@ def on_file_uploaded(file):
     if file is None:
         return (
             gr.update(visible=False),
-            gr.update(visible=False, maximum=1, value=1),
+            gr.update(visible=False, minimum=1, maximum=2, value=1),
             "No file uploaded",
             None,
         )
@@ -156,16 +156,17 @@ def on_file_uploaded(file):
         pil_img, total_pages = _get_page_pil(file_path, 1)
         is_multipage = total_pages > 1
         page_info = f"Document loaded: {total_pages} page{'s' if total_pages > 1 else ''}"
+        slider_max = max(2, total_pages)
         return (
             gr.update(visible=is_multipage),
-            gr.update(visible=is_multipage, minimum=1, maximum=total_pages, value=1, step=1),
+            gr.update(visible=is_multipage, minimum=1, maximum=slider_max, value=1, step=1),
             page_info,
             pil_img,
         )
     except Exception as e:
         return (
             gr.update(visible=False),
-            gr.update(visible=False, maximum=1, value=1),
+            gr.update(visible=False, minimum=1, maximum=2, value=1),
             f"Error loading file: {e}",
             None,
         )
@@ -375,7 +376,7 @@ with gr.Blocks(title="Indra-Advanced Document Intelligence") as demo:
                 page_info_label = gr.Markdown("Page 1 of 1")
                 page_slider = gr.Slider(
                     minimum=1,
-                    maximum=1,
+                    maximum=2,
                     value=1,
                     step=1,
                     label="Page Navigation",
