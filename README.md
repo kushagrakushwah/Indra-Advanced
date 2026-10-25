@@ -1,28 +1,29 @@
 ---
-title: Indra-Advanced
+title: Indra Advanced
 emoji: 📄
 colorFrom: blue
 colorTo: indigo
-sdk: docker
-app_port: 7860
+sdk: gradio
+sdk_version: 6.30.0
+python_version: '3.12'
+app_file: app.py
 pinned: false
 license: apache-2.0
+short_description: Document and table intelligence pipeline with model comparison
 ---
 
 # Indra-Advanced
 
-A lightweight CPU document intelligence pipeline combining table structure recognition, OCR, relational serialization, and zero-shot schema extraction into typed JSON.
+A lightweight document intelligence pipeline that combines table structure recognition, OCR, associative serialization, and zero-shot schema extraction.
 
-## Comparison: Indra Original vs Indra-Advanced
-
-### Architecture Flow
+## Architecture Comparison
 
 ```mermaid
 flowchart TD
     subgraph Indra_Original["Indra Original (~1M params)"]
         A1["Input Image"] --> B1["Line Detection + CTC OCR"]
         B1 --> C1["Raw Markdown / Text Dump"]
-        C1 -.->|Requires heavy external LLM| D1["Structured JSON"]
+        C1 -.->|Requires external LLM| D1["Structured JSON"]
     end
 
     subgraph Indra_Advanced["Indra-Advanced (~77M-90M params)"]
@@ -30,33 +31,23 @@ flowchart TD
         A2 --> C2["PP-OCRv4 Text Recognition"]
         B2 & C2 --> D2["Associative Serializer (Header: Value Bridge)"]
         D2 --> E2["GLiNER Zero-Shot Extraction"]
-        E2 --> F2["Final Typed JSON Output"]
+        E2 --> F2["Typed JSON Output"]
     end
 ```
 
-### Feature Comparison
+## Feature Comparison
 
 | Capability | Indra Original | Indra-Advanced |
 | :--- | :--- | :--- |
-| Primary Role | OCR and text line detection | End-to-end schema information extraction |
-| Recognition Core Size | ~1 million parameters | ~77M to 90M parameters |
-| Output Format | Plain Markdown and line boxes | Typed JSON, table rows, and Markdown |
+| Primary Role | OCR and line detection | End-to-end schema extraction |
+| Core Parameter Size | ~1M parameters | ~77M to 90M parameters |
+| Output Format | Plain Markdown line dump | Typed JSON, table rows, and Markdown |
 | Schema Extraction | No (requires external LLM) | Yes (direct zero-shot extraction) |
 | Relational Serialization | No (line clustering) | Yes (Header-to-Value preservation) |
-| Complex Stamp / Fine-Print | Prone to character drops | High-precision DBNet + CRNN |
-| Target Runtime | CPU | CPU |
+| Multi-Page Books | External loop required | Native multi-page navigation via PDFium |
+| Fine-Print / Stamp OCR | Prone to character drops | High-precision DBNet + CRNN |
 
-## Quickstart
-
-### Installation
-
-```bash
-python -m venv .venv
-source .venv/bin/activate  # On Windows: .\.venv\Scripts\activate
-pip install -r requirements.txt
-```
-
-### Usage
+## Usage
 
 ```python
 from indra_advanced import IndraAdvancedPipeline
@@ -66,10 +57,4 @@ pipeline = IndraAdvancedPipeline()
 result = pipeline.process("document.png", schema=INVOICE_SCHEMA)
 
 print(result.structured_json)
-```
-
-### Web UI & API
-
-```bash
-uvicorn indra_advanced.server:app --host 0.0.0.0 --port 7860
 ```

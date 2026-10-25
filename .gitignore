@@ -17,3 +17,6 @@ data/
 .user_uploaded/
 GLiNER implementation on llm analyst agent/
 duckdb implementation/
+
+uploads/
+*.egg-info/
