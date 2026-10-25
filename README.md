@@ -9,7 +9,7 @@ python_version: '3.12'
 app_file: app.py
 pinned: false
 license: apache-2.0
-short_description: Document and table intelligence pipeline with model comparison
+short_description: Document and table intelligence pipeline
 ---
 
 # Indra-Advanced
