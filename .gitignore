@@ -1,0 +1,19 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.log
+gdoc_images/
+gdoc.html
+gdoc_indra_output.txt
+indra_result.json
+indra_markdown.txt
+indra_advanced_result.json
+demo_results/
+demo_output/
+data/
+*.duckdb
+.user_uploaded/
+GLiNER implementation on llm analyst agent/
+duckdb implementation/
