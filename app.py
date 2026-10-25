@@ -2,11 +2,8 @@
 Indra-Advanced & Indra-Original Document Intelligence Playground
 Hosted on Hugging Face Spaces with ZeroGPU.
 
-Features:
-- Multi-page document navigation (entire PDF books or single images)
-- Model Switcher: Indra-Advanced (~90M params), Indra Original (1M params), Side-by-Side Comparison
-- Zero-Shot Typed JSON Schema Extraction (GLiNER)
-- Table Structure Recognition & Associative Serialization (SLANet + PP-OCRv4)
+Uses official datalab-to/indra (indra-ocr) for Indra Original (~1M params)
+and Indra-Advanced (~90M params: SLANet + PP-OCRv4 + Associative Serializer + GLiNER).
 """
 
 import os
@@ -36,12 +33,12 @@ from indra_advanced.schemas.base_schema import ExtractionSchema
 
 pipeline = IndraAdvancedPipeline()
 
-# Load Indra Original if available
+# Load official Indra Original (datalab-to/indra)
 try:
     import indra_ocr
     INDRA_OCR_AVAILABLE = True
     indra_converter = indra_ocr.load()
-except Exception:
+except Exception as e:
     INDRA_OCR_AVAILABLE = False
     indra_converter = None
 
@@ -99,46 +96,65 @@ def _get_page_pil(file_path: str, page_number: int = 1) -> Tuple[Image.Image, in
         return pil_img, 1
 
 
-def draw_bounding_boxes(
+def draw_styled_annotations(
     pil_img: Image.Image,
-    boxes: List[List[float]],
-    labels: Optional[List[str]] = None,
-    color: str = "#007acc",
-    fill_alpha: int = 40,
+    items: List[Dict[str, Any]],
+    default_border_color: Tuple[int, int, int] = (26, 115, 232),
+    default_badge_bg: Tuple[int, int, int] = (232, 240, 254),
+    default_badge_text: Tuple[int, int, int] = (23, 78, 166),
 ) -> Image.Image:
-    """Draw bounding boxes with transparent overlays and legible tags."""
+    """
+    Renders bounding boxes with pill badges matching the Indra visual inspection layout.
+    items: List of dicts with keys:
+      - 'box': [x1, y1, x2, y2]
+      - 'label': str (e.g. 'Section-Header', 'Text', 'Page-Header', 'book_title', etc.)
+      - 'is_container': bool (whether this is a macro block like Section-Header)
+      - 'border_color': optional tuple
+      - 'badge_bg': optional tuple
+      - 'badge_text': optional tuple
+    """
     img_copy = pil_img.copy()
     overlay = Image.new("RGBA", img_copy.size, (255, 255, 255, 0))
-    overlay_draw = ImageDraw.Draw(overlay)
-    solid_draw = ImageDraw.Draw(img_copy)
-
-    # Parse hex color
-    hex_color = color.lstrip("#")
-    r, g, b = tuple(int(hex_color[i : i + 2], 16) for i in (0, 2, 4))
-    fill_color = (r, g, b, fill_alpha)
-    outline_color = (r, g, b, 220)
+    draw_overlay = ImageDraw.Draw(overlay)
+    draw_solid = ImageDraw.Draw(img_copy)
 
     try:
         font = ImageFont.load_default()
     except Exception:
         font = None
 
-    for i, box in enumerate(boxes):
-        if len(box) == 4:
-            x1, y1, x2, y2 = box
-        else:
+    for item in items:
+        box = item.get("box")
+        if not box or len(box) != 4:
             continue
 
-        overlay_draw.rectangle([x1, y1, x2, y2], fill=fill_color)
-        solid_draw.rectangle([x1, y1, x2, y2], outline=outline_color[:3], width=2)
+        x1, y1, x2, y2 = box
+        label = item.get("label", "Text")
+        is_container = item.get("is_container", False)
 
-        if labels and i < len(labels) and labels[i]:
-            tag = labels[i]
-            solid_draw.rectangle([x1, max(0, y1 - 14), x1 + len(tag) * 6 + 6, y1], fill=(r, g, b))
-            solid_draw.text((x1 + 3, max(0, y1 - 13)), tag, fill=(255, 255, 255), font=font)
+        border = item.get("border_color", default_border_color)
+        badge_bg = item.get("badge_bg", default_badge_bg)
+        badge_txt = item.get("badge_text", default_badge_text)
 
-    img_copy.paste(Image.alpha_composite(img_copy.convert("RGBA"), overlay).convert("RGB"))
-    return img_copy
+        # Draw semi-transparent fill
+        fill_alpha = 35 if is_container else 20
+        draw_overlay.rectangle([x1, y1, x2, y2], fill=(border[0], border[1], border[2], fill_alpha))
+
+        # Draw solid outline
+        width = 2 if is_container else 1
+        draw_solid.rectangle([x1, y1, x2, y2], outline=border, width=width)
+
+        # Draw badge above box
+        if label:
+            badge_w = len(label) * 6 + 8
+            badge_h = 13
+            by1 = max(0, y1 - badge_h) if y1 > badge_h else y1
+            by2 = by1 + badge_h
+            draw_solid.rectangle([x1, by1, x1 + badge_w, by2], fill=badge_bg, outline=border, width=1)
+            draw_solid.text((x1 + 3, by1 + 1), label, fill=badge_txt, font=font)
+
+    result = Image.alpha_composite(img_copy.convert("RGBA"), overlay).convert("RGB")
+    return result
 
 
 def on_file_uploaded(file):
@@ -195,7 +211,8 @@ def process_document(
 ):
     """Run model inference on the selected page and generate structured outputs."""
     if file is None:
-        return None, {}, "Please upload a document or select an example above.", ""
+        empty_df = [["-", "No document uploaded", "-"]]
+        return None, empty_df, {}, "Please upload a document or select an example above.", "", None, None, [], []
 
     file_path = file.name if hasattr(file, "name") else str(file)
     pil_img, total_pages = _get_page_pil(file_path, int(page_num))
@@ -209,169 +226,246 @@ def process_document(
         labels = PRECONFIGURED_SCHEMAS.get(schema_choice, PRECONFIGURED_SCHEMAS["Academic Book"])
         schema = ExtractionSchema.from_labels(schema_choice.lower().replace(" ", "_"), labels)
 
-    results = {}
-    annotated_img = pil_img.copy()
-    markdown_output = ""
-    json_output = {}
-    metrics_md = ""
-
-    # 1. Indra Original Inference
     indra_orig_data = None
-    if model_choice in ("Indra Original (1M)", "Side-by-Side Comparison"):
+    indra_orig_annotated = None
+    indra_orig_table = []
+
+    # 1. Process with Indra Original (datalab-to/indra)
+    if model_choice in ("Indra Original (1M)", "Side-by-Side Analysis"):
         if INDRA_OCR_AVAILABLE and indra_converter is not None:
             t0 = time.perf_counter()
             with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
                 pil_img.save(tmp.name)
                 tmp_path = tmp.name
             try:
-                _, indra_page = next(indra_converter.convert(tmp_path))
+                pages_res = list(indra_converter.convert(tmp_path))
                 elapsed_ms = (time.perf_counter() - t0) * 1000
-                lines = []
-                for idx, line in enumerate(indra_page.lines):
-                    lines.append({
-                        "id": idx + 1,
-                        "text": line.text,
-                        "conf": round(float(line.conf), 2),
-                        "box": [round(c, 1) for c in line.box],
-                    })
-                indra_orig_data = {
-                    "latency_ms": round(elapsed_ms, 2),
-                    "markdown": indra_page.markdown,
-                    "num_lines": len(lines),
-                    "lines": lines,
-                }
+                if pages_res:
+                    _, indra_page = pages_res[0]
+                    orig_items = []
+
+                    # 1. Add layout blocks (Section-Header, Page-Header, Table, Text)
+                    if hasattr(indra_page, "blocks") and indra_page.blocks:
+                        for b in indra_page.blocks:
+                            lbl = b.get("label", "Block")
+                            bbox = b.get("bbox", [])
+                            if len(bbox) == 4:
+                                is_sec = "Header" in lbl or "Table" in lbl
+                                border = (26, 115, 232) if not is_sec else (21, 101, 192)
+                                bg = (232, 240, 254) if not is_sec else (227, 242, 253)
+                                txt_c = (23, 78, 166) if not is_sec else (13, 71, 161)
+                                orig_items.append({
+                                    "box": [round(c, 1) for c in bbox],
+                                    "label": lbl,
+                                    "is_container": is_sec,
+                                    "border_color": border,
+                                    "badge_bg": bg,
+                                    "badge_text": txt_c,
+                                })
+
+                    # 2. Add lines
+                    orig_lines = []
+                    for idx, line in enumerate(indra_page.lines, 1):
+                        conf_val = round(float(line.conf), 2)
+                        orig_lines.append([idx, line.text, conf_val])
+                        # If no macro blocks, draw line-level boxes
+                        if not indra_page.blocks:
+                            orig_items.append({
+                                "box": [round(c, 1) for c in line.box],
+                                "label": "Text",
+                                "is_container": False,
+                            })
+
+                    indra_orig_table = orig_lines
+                    indra_orig_annotated = draw_styled_annotations(pil_img, orig_items)
+                    indra_orig_data = {
+                        "latency_ms": round(elapsed_ms, 2),
+                        "markdown": indra_page.markdown or "",
+                        "num_lines": len(orig_lines),
+                        "lines": orig_lines,
+                    }
             finally:
                 if os.path.exists(tmp_path):
                     os.unlink(tmp_path)
         else:
-            indra_orig_data = {
-                "error": "indra-ocr package is not available in current environment",
-                "markdown": "Indra OCR unavailable",
-            }
+            indra_orig_table = [["-", "indra-ocr package not available in environment", "-"]]
+            indra_orig_annotated = pil_img.copy()
+            indra_orig_data = {"error": "indra-ocr not available"}
 
-    # 2. Indra-Advanced Inference
+    # 2. Process with Indra-Advanced (~90M)
     indra_adv_data = None
-    if model_choice in ("Indra-Advanced (~90M)", "Side-by-Side Comparison"):
+    indra_adv_annotated = None
+    indra_adv_table = []
+
+    if model_choice in ("Indra-Advanced (~90M)", "Side-by-Side Analysis"):
         t0 = time.perf_counter()
         adv_res = pipeline.process(img_array, schema=schema)
         elapsed_ms = (time.perf_counter() - t0) * 1000
 
-        boxes = []
-        labels_list = []
+        adv_items = []
+        # Build set of extracted entity texts for matching
+        entity_map = {}
+        for ent in adv_res.raw_entities:
+            entity_map[ent.text.strip().lower()] = ent.label
+
+        # Collect lines & match with extracted entities
         if adv_res.ocr_result and adv_res.ocr_result.boxes:
-            for box, text in zip(adv_res.ocr_result.boxes, adv_res.ocr_result.texts):
+            for idx, (box, text, score) in enumerate(
+                zip(adv_res.ocr_result.boxes, adv_res.ocr_result.texts, adv_res.ocr_result.scores),
+                1,
+            ):
                 xs = [pt[0] for pt in box]
                 ys = [pt[1] for pt in box]
-                boxes.append([min(xs), min(ys), max(xs), max(ys)])
-                labels_list.append(text[:20])
+                bbox = [round(min(xs), 1), round(min(ys), 1), round(max(xs), 1), round(max(ys), 1)]
+                conf_val = round(float(score), 2)
+                adv_adv_text = text.strip()
+                indra_adv_table.append([idx, adv_adv_text, conf_val])
 
+                # Check if this line is an extracted schema entity
+                matched_label = None
+                adv_lower = adv_adv_text.lower()
+                for e_text, e_label in entity_map.items():
+                    if e_text in adv_lower or adv_lower in e_text:
+                        matched_label = e_label
+                        break
+
+                if matched_label:
+                    # Entity badge (Emerald Green)
+                    adv_items.append({
+                        "box": bbox,
+                        "label": matched_label,
+                        "is_container": True,
+                        "border_color": (16, 185, 129),
+                        "badge_bg": (236, 253, 245),
+                        "badge_text": (6, 95, 70),
+                    })
+                else:
+                    # Text line badge (Blue)
+                    adv_items.append({
+                        "box": bbox,
+                        "label": "Text",
+                        "is_container": False,
+                        "border_color": (37, 99, 235),
+                        "badge_bg": (239, 246, 255),
+                        "badge_text": (30, 64, 175),
+                    })
+
+        # Add detected table regions if any
+        if adv_res.cell_bboxes:
+            for cell in adv_res.cell_bboxes[:10]:
+                adv_items.append({
+                    "box": [round(c, 1) for c in cell],
+                    "label": "Table-Cell",
+                    "is_container": False,
+                    "border_color": (139, 92, 246),
+                    "badge_bg": (245, 243, 255),
+                    "badge_text": (109, 40, 217),
+                })
+
+        indra_adv_annotated = draw_styled_annotations(pil_img, adv_items)
         indra_adv_data = {
             "latency_ms": round(elapsed_ms, 2),
             "structured_json": adv_res.structured_json,
             "markdown_table": adv_res.markdown_table,
             "serialized_text": adv_res.serialized_text,
             "timing_breakdown_ms": adv_res.timing_breakdown_ms,
-            "num_lines": len(boxes),
-            "boxes": boxes,
-            "labels": labels_list,
+            "num_lines": len(indra_adv_table),
+            "lines": indra_adv_table,
         }
 
-    # Render outputs according to model choice
+    # Format return outputs depending on choice
     if model_choice == "Indra Original (1M)":
-        if indra_orig_data and "lines" in indra_orig_data:
-            orig_boxes = [l["box"] for l in indra_orig_data["lines"]]
-            orig_labels = [f"#{l['id']}" for l in indra_orig_data["lines"]]
-            annotated_img = draw_bounding_boxes(pil_img, orig_boxes, orig_labels, color="#e65100")
-            markdown_output = indra_orig_data["markdown"]
-            json_output = {
-                "info": "Indra Original produces raw text & lines only. Schema extraction requires an external LLM.",
-                "total_lines_detected": indra_orig_data["num_lines"],
-                "lines": indra_orig_data["lines"][:25],
-            }
-            metrics_md = f"**Latency:** {indra_orig_data['latency_ms']} ms | **Parameters:** ~1M | **OCR Lines:** {indra_orig_data['num_lines']}"
-        else:
-            markdown_output = indra_orig_data.get("error", "Error running Indra Original")
+        display_img = indra_orig_annotated or pil_img
+        display_table = indra_orig_table
+        display_json = {
+            "model": "Indra Original (datalab-to/indra)",
+            "parameter_size": "~1M parameters",
+            "limitation": "Indra Original performs line detection and OCR only. Typed JSON schema extraction requires an external LLM.",
+            "total_lines": len(indra_orig_table),
+        }
+        display_md = f"### Indra Original Markdown Output\n\n```markdown\n{indra_orig_data.get('markdown', '')}\n```"
+        metrics_md = (
+            f"**Model:** Indra Original (`datalab-to/indra`) | "
+            f"**Latency:** {indra_orig_data.get('latency_ms', 'N/A')} ms | "
+            f"**Parameters:** ~1M | "
+            f"**Detected Lines:** {len(indra_orig_table)}"
+        )
+        return display_img, display_table, display_json, display_md, metrics_md, indra_adv_annotated, indra_orig_annotated, indra_adv_table, indra_orig_table
 
     elif model_choice == "Indra-Advanced (~90M)":
-        if indra_adv_data:
-            annotated_img = draw_bounding_boxes(
-                pil_img,
-                indra_adv_data["boxes"],
-                indra_adv_data["labels"],
-                color="#00838f",
-            )
-            json_output = indra_adv_data["structured_json"]
-            markdown_output = (
-                f"### Reconstructed Table & Serialized Text\n\n"
-                f"{indra_adv_data['markdown_table'] or indra_adv_data['serialized_text']}"
-            )
-            metrics_md = (
-                f"**Total Latency:** {indra_adv_data['latency_ms']} ms | "
-                f"**Parameters:** ~90M | "
-                f"**Detected Lines:** {indra_adv_data['num_lines']}\n\n"
-                f"**Stage Breakdown:** "
-                + " | ".join(f"{k}: {v}ms" for k, v in indra_adv_data["timing_breakdown_ms"].items())
-            )
+        display_img = indra_adv_annotated or pil_img
+        display_table = indra_adv_table
+        display_json = indra_adv_data["structured_json"]
+        display_md = (
+            f"### Reconstructed Table & Serialized Text\n\n"
+            f"{indra_adv_data['markdown_table'] or indra_adv_data['serialized_text']}"
+        )
+        metrics_md = (
+            f"**Model:** Indra-Advanced | "
+            f"**Total Latency:** {indra_adv_data['latency_ms']} ms | "
+            f"**Parameters:** ~90M | "
+            f"**Detected Lines:** {len(indra_adv_table)}\n\n"
+            f"**Stage Breakdown:** "
+            + " | ".join(f"{k}: {v}ms" for k, v in indra_adv_data["timing_breakdown_ms"].items())
+        )
+        return display_img, display_table, display_json, display_md, metrics_md, indra_adv_annotated, indra_orig_annotated, indra_adv_table, indra_orig_table
 
-    else:  # Side-by-Side Comparison
-        if indra_adv_data:
-            annotated_img = draw_bounding_boxes(
-                pil_img,
-                indra_adv_data["boxes"],
-                indra_adv_data["labels"],
-                color="#00838f",
-            )
-            json_output = {
-                "indra_advanced_schema_extraction": indra_adv_data["structured_json"],
-                "indra_original_limitation": "Indra Original output is unstructured raw text; cannot extract typed schema without external LLM.",
-            }
-
-            orig_md = indra_orig_data.get("markdown", "N/A") if indra_orig_data else "N/A"
-            adv_table = indra_adv_data["markdown_table"] or indra_adv_data["serialized_text"]
-
-            markdown_output = (
-                f"### Side-by-Side Reconstruction\n\n"
-                f"#### Indra-Advanced Output\n"
-                f"{adv_table}\n\n"
-                f"---\n\n"
-                f"#### Indra Original Output (Raw Markdown Line Dump)\n"
-                f"```markdown\n{orig_md}\n```\n"
-            )
-
-            orig_time = indra_orig_data.get("latency_ms", "N/A") if indra_orig_data else "N/A"
-            metrics_md = (
-                f"| Metric | Indra Original (1M) | Indra-Advanced (~90M) |\n"
-                f"| :--- | :--- | :--- |\n"
-                f"| **Latency** | {orig_time} ms | {indra_adv_data['latency_ms']} ms |\n"
-                f"| **Extracted Schema** | None (Raw Markdown) | Typed JSON (`{schema_choice}`) |\n"
-                f"| **Table Reconstruction** | Line clusters | Hierarchical & Markdown table |\n"
-                f"| **Fine-Print / Stamp** | Prone to character drops | High-precision DBNet + CRNN |\n"
-                f"| **External LLM Needed?** | Yes | No (Zero-shot onboard) |"
-            )
-
-    return annotated_img, json_output, markdown_output, metrics_md
+    else:  # Side-by-Side Analysis
+        # Active view default is Indra-Advanced
+        display_img = indra_adv_annotated or pil_img
+        display_table = indra_adv_table
+        display_json = {
+            "indra_advanced_schema_extraction": indra_adv_data["structured_json"],
+            "indra_original_limitation": "Indra Original outputs raw line tokens and cannot extract schema fields without an external LLM.",
+        }
+        orig_md = indra_orig_data.get("markdown", "N/A") if indra_orig_data else "N/A"
+        adv_table_md = indra_adv_data["markdown_table"] or indra_adv_data["serialized_text"]
+        display_md = (
+            f"### Side-by-Side Text & Table Comparison\n\n"
+            f"#### Indra-Advanced Reconstructed Table\n{adv_table_md}\n\n"
+            f"---\n\n"
+            f"#### Indra Original Raw Markdown Dump\n```markdown\n{orig_md}\n```"
+        )
+        orig_time = indra_orig_data.get("latency_ms", "N/A") if indra_orig_data else "N/A"
+        metrics_md = (
+            f"| Capability | Indra Original (`datalab-to/indra`) | Indra-Advanced (~90M) |\n"
+            f"| :--- | :--- | :--- |\n"
+            f"| **Core Parameters** | ~1M parameters | ~77M - 90M parameters |\n"
+            f"| **Inference Latency** | {orig_time} ms | {indra_adv_data['latency_ms']} ms |\n"
+            f"| **Extracted Schema** | None (Raw lines dump) | Typed JSON (`{schema_choice}`) |\n"
+            f"| **Table Reconstruction** | Line clustering | Associative Header-to-Value pairs |\n"
+            f"| **Fine-Print / Stamp OCR** | Prone to character drops | High-precision DBNet + CRNN |\n"
+            f"| **External LLM Required?** | Yes | No (Zero-shot onboard) |"
+        )
+        return display_img, display_table, display_json, display_md, metrics_md, indra_adv_annotated, indra_orig_annotated, indra_adv_table, indra_orig_table
 
 
 # Build Gradio UI
-with gr.Blocks(title="Indra-Advanced Document Intelligence") as demo:
+with gr.Blocks(title="Indra Document Intelligence") as demo:
     gr.Markdown(
         """
-        # Indra-Advanced: Document & Table Intelligence
-        A lightweight pipeline combining table structure recognition, OCR, associative serialization, and zero-shot schema extraction.
+        # Indra Document Intelligence: Original vs Advanced
+        Visual inspection, multi-page book navigation, and zero-shot schema extraction.
         
-        Compare **Indra Original (1M params)** vs **Indra-Advanced (~90M params)** on academic books, invoices, and multi-page PDFs.
+        Comparing **Indra Original (`datalab-to/indra` ~1M)** with **Indra-Advanced (~90M)**.
         """
     )
 
-    with gr.Row():
-        # Left Column: Inputs & Controls
-        with gr.Column(scale=1):
-            file_input = gr.File(
-                label="Upload Document (PDF Book or Image)",
-                file_types=[".pdf", ".png", ".jpg", ".jpeg", ".webp", ".tiff", ".bmp"],
-                type="filepath",
-            )
+    # State stores for switching visual inspection between models in Side-by-Side mode
+    adv_img_state = gr.State(None)
+    orig_img_state = gr.State(None)
+    adv_table_state = gr.State([])
+    orig_table_state = gr.State([])
 
+    with gr.Row():
+        file_input = gr.File(
+            label="Upload Document (PDF Book or Image)",
+            file_types=[".pdf", ".png", ".jpg", ".jpeg", ".webp", ".tiff", ".bmp"],
+            type="filepath",
+            scale=2,
+        )
+
+        with gr.Column(scale=2):
             with gr.Group(visible=False) as page_nav_group:
                 page_info_label = gr.Markdown("Page 1 of 1")
                 page_slider = gr.Slider(
@@ -382,17 +476,18 @@ with gr.Blocks(title="Indra-Advanced Document Intelligence") as demo:
                     label="Page Navigation",
                 )
 
-            model_dropdown = gr.Dropdown(
-                choices=["Indra-Advanced (~90M)", "Indra Original (1M)", "Side-by-Side Comparison"],
-                value="Indra-Advanced (~90M)",
-                label="Model Selection",
-            )
+            with gr.Row():
+                model_dropdown = gr.Dropdown(
+                    choices=["Indra-Advanced (~90M)", "Indra Original (1M)", "Side-by-Side Analysis"],
+                    value="Side-by-Side Analysis",
+                    label="Active Model",
+                )
 
-            schema_dropdown = gr.Dropdown(
-                choices=["Academic Book", "Invoice / Receipt", "Financial / Bank Statement", "Custom"],
-                value="Academic Book",
-                label="Extraction Schema",
-            )
+                schema_dropdown = gr.Dropdown(
+                    choices=["Academic Book", "Invoice / Receipt", "Financial / Bank Statement", "Custom"],
+                    value="Academic Book",
+                    label="Extraction Schema",
+                )
 
             custom_labels_input = gr.Textbox(
                 label="Custom Entity Labels (comma-separated)",
@@ -402,35 +497,57 @@ with gr.Blocks(title="Indra-Advanced Document Intelligence") as demo:
 
             run_btn = gr.Button("Run Document Extraction", variant="primary")
 
-            # Built-in Examples
-            example_paths = []
-            if os.path.exists("theory_of_computation.png"):
-                example_paths.append(["theory_of_computation.png", "Academic Book"])
-            if os.path.exists("demo_invoice.png"):
-                example_paths.append(["demo_invoice.png", "Invoice / Receipt"])
+    # Built-in Examples
+    example_paths = []
+    if os.path.exists("theory_of_computation.png"):
+        example_paths.append(["theory_of_computation.png", "Academic Book"])
+    if os.path.exists("demo_invoice.png"):
+        example_paths.append(["demo_invoice.png", "Invoice / Receipt"])
 
-            if example_paths:
-                gr.Examples(
-                    examples=example_paths,
-                    inputs=[file_input, schema_dropdown],
-                    label="Quick Examples",
+    if example_paths:
+        gr.Examples(
+            examples=example_paths,
+            inputs=[file_input, schema_dropdown],
+            label="Quick Test Examples",
+        )
+
+    gr.Markdown("---")
+
+    # Main Visual & Line Inspection View (Exactly like user's screenshot!)
+    with gr.Row():
+        with gr.Column(scale=1):
+            with gr.Row():
+                view_toggle = gr.Radio(
+                    choices=["Indra-Advanced Annotations", "Indra Original Annotations"],
+                    value="Indra-Advanced Annotations",
+                    label="Visual Annotation Switcher",
                 )
+            image_output = gr.Image(
+                label="Document Visual Inspection (Bounding Boxes & Badges)",
+                type="pil",
+            )
 
-        # Right Column: Visual and Structured Results
-        with gr.Column(scale=2):
-            metrics_display = gr.Markdown("Ready to process document.")
+        with gr.Column(scale=1):
+            gr.Markdown("### Extracted Text Lines & Confidence Scores")
+            lines_dataframe = gr.Dataframe(
+                headers=["#", "Extracted Text", "Confidence"],
+                datatype=["number", "str", "number"],
+                column_count=(3, "fixed"),
+                interactive=False,
+                label="Line-by-Line OCR Output",
+            )
 
-            with gr.Tabs():
-                with gr.TabItem("Visual Inspection"):
-                    image_output = gr.Image(label="Annotated Page with Detected Regions", type="pil")
+    # Detailed Structured & Comparative Intelligence Below
+    metrics_display = gr.Markdown("Ready to process document.")
 
-                with gr.TabItem("Structured JSON"):
-                    json_output = gr.JSON(label="Extracted Schema Fields")
+    with gr.Tabs():
+        with gr.TabItem("Structured JSON Schema (Zero-Shot)"):
+            json_output = gr.JSON(label="Extracted Typed Schema Fields")
 
-                with gr.TabItem("Markdown & Table Output"):
-                    markdown_output = gr.Markdown()
+        with gr.TabItem("Table Structure & Serialized Markdown"):
+            markdown_output = gr.Markdown()
 
-    # Dynamic interactions
+    # Event handlers
     def toggle_custom_schema(schema_name):
         return gr.update(visible=(schema_name == "Custom"))
 
@@ -452,6 +569,22 @@ with gr.Blocks(title="Indra-Advanced Document Intelligence") as demo:
         outputs=[image_output, page_info_label],
     )
 
+    def switch_annotation_view(choice, adv_img, orig_img, adv_table, orig_table):
+        if choice == "Indra Original Annotations":
+            img = orig_img if orig_img is not None else adv_img
+            tbl = orig_table if orig_table else adv_table
+            return img, tbl
+        else:
+            img = adv_img if adv_img is not None else orig_img
+            tbl = adv_table if adv_table else orig_table
+            return img, tbl
+
+    view_toggle.change(
+        fn=switch_annotation_view,
+        inputs=[view_toggle, adv_img_state, orig_img_state, adv_table_state, orig_table_state],
+        outputs=[image_output, lines_dataframe],
+    )
+
     run_btn.click(
         fn=process_document,
         inputs=[
@@ -463,9 +596,14 @@ with gr.Blocks(title="Indra-Advanced Document Intelligence") as demo:
         ],
         outputs=[
             image_output,
+            lines_dataframe,
             json_output,
             markdown_output,
             metrics_display,
+            adv_img_state,
+            orig_img_state,
+            adv_table_state,
+            orig_table_state,
         ],
     )
 
