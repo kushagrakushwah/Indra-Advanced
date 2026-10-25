@@ -1,3 +1,14 @@
+---
+title: Indra-Advanced
+emoji: 📄
+colorFrom: blue
+colorTo: indigo
+sdk: docker
+app_port: 7860
+pinned: false
+license: apache-2.0
+---
+
 # Indra-Advanced
 
 A lightweight CPU document intelligence pipeline combining table structure recognition, OCR, relational serialization, and zero-shot schema extraction into typed JSON.
@@ -60,5 +71,5 @@ print(result.structured_json)
 ### Web UI & API
 
 ```bash
-uvicorn indra_advanced.server:app --host 0.0.0.0 --port 8000
+uvicorn indra_advanced.server:app --host 0.0.0.0 --port 7860
 ```
